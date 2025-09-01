@@ -101,24 +101,37 @@ class VibeVoiceDemo:
                 self.model_path,
             )
             
-            # Load model
+            # Load model with appropriate attention implementation
+            # Flash Attention 2 is not available on Windows, so use SDPA instead
+            import platform
+            if platform.system() == "Windows":
+                print("🪟 Windows detected: Using SDPA attention implementation (Flash Attention 2 not available on Windows)")
+                attn_implementation = 'sdpa'
+            else:
+                print("🐧 Linux/Unix detected: Using Flash Attention 2 for optimal performance")
+                attn_implementation = 'flash_attention_2'
+            
             try:
                 self.model = VibeVoiceForConditionalGenerationInference.from_pretrained(
                     self.model_path,
                     torch_dtype=torch.bfloat16,
                     device_map='cuda',
-                    attn_implementation='flash_attention_2' # flash_attention_2 is recommended
+                    attn_implementation=attn_implementation
                 )
             except Exception as e:
-                print(f"[ERROR] : {type(e).__name__}: {e}")
-                print(traceback.format_exc())
-                print("Error loading the model. Trying to use SDPA. However, note that only flash_attention_2 has been fully tested, and using SDPA may result in lower audio quality.")
-                self.model = VibeVoiceForConditionalGenerationInference.from_pretrained(
-                    self.model_path,
-                    torch_dtype=torch.bfloat16,
-                    device_map='cuda',
-                    attn_implementation='sdpa'
-                )
+                if 'flash_attn' in str(e) and attn_implementation == 'flash_attention_2':
+                    print(f"⚠️ Flash Attention 2 not available: {e}")
+                    print("🔄 Falling back to SDPA attention implementation...")
+                    self.model = VibeVoiceForConditionalGenerationInference.from_pretrained(
+                        self.model_path,
+                        torch_dtype=torch.bfloat16,
+                        device_map='cuda',
+                        attn_implementation='sdpa'
+                    )
+                else:
+                    print(f"❌ Error loading model: {type(e).__name__}: {e}")
+                    print(traceback.format_exc())
+                    raise e
             self.model.eval()
             
             # Use SDE solver by default
