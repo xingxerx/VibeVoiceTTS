@@ -19,6 +19,8 @@ import soundfile as sf
 import torch
 import os
 import traceback
+from huggingface_hub import snapshot_download, hf_hub_download
+import shutil
 
 from vibevoice.modular.configuration_vibevoice import VibeVoiceConfig
 from vibevoice.modular.modeling_vibevoice_inference import VibeVoiceForConditionalGenerationInference
@@ -30,6 +32,10 @@ from transformers import set_seed
 logging.set_verbosity_info()
 logger = logging.get_logger(__name__)
 
+# Suppress the APEX FusedRMSNorm warning message
+tokenizer_logger = logging.get_logger("vibevoice.modular.modular_vibevoice_tokenizer")
+tokenizer_logger.setLevel(logging.ERROR)  # Only show ERROR level and above
+
 
 class VibeVoiceDemo:
     def __init__(self, model_path: str, device: str = "cuda", inference_steps: int = 5):
@@ -40,7 +46,28 @@ class VibeVoiceDemo:
         self.is_generating = False  # Track generation state
         self.stop_generation = False  # Flag to stop generation
         self.current_streamer = None  # Track current audio streamer
-        self.load_model()
+        self.is_downloading = False  # Track download state
+        
+        # Available models for download
+        self.available_models = {
+            "VibeVoice-1.5B": {
+                "repo_id": "microsoft/VibeVoice-1.5B",
+                "size": "~2.7B parameters",
+                "description": "Compact model, good for most use cases"
+            },
+            "VibeVoice-7B-Preview": {
+                "repo_id": "WestZhang/VibeVoice-Large-pt", 
+                "size": "~9.34B parameters",
+                "description": "Larger model, potentially higher quality"
+            }
+        }
+        
+        # Don't auto-load model - let user choose
+        self.model = None
+        self.processor = None
+        print("🎙️ VibeVoice Demo initialized without loading a model.")
+        print("💡 Use the Model Status section to select and load a model.")
+        
         self.setup_voice_presets()
         self.load_example_scripts()  # Load example scripts
         
@@ -48,41 +75,258 @@ class VibeVoiceDemo:
         """Load the VibeVoice model and processor."""
         print(f"Loading processor & model from {self.model_path}")
         
-        # Load processor
-        self.processor = VibeVoiceProcessor.from_pretrained(
-            self.model_path,
-        )
+        # Check if model path exists
+        if not os.path.exists(self.model_path):
+            print(f"⚠️ Model path does not exist: {self.model_path}")
+            print("🔄 The demo will start without a loaded model.")
+            print("💡 Use the Model Download section in the UI to download a model first.")
+            self.model = None
+            self.processor = None
+            return
         
-        # Load model
+        # Check if path contains model files
+        if not self._is_valid_model_path(self.model_path):
+            print(f"⚠️ No valid model files found at: {self.model_path}")
+            print("🔄 The demo will start without a loaded model.")
+            print("💡 Use the Model Download section in the UI to download a model first.")
+            self.model = None
+            self.processor = None
+            return
+        
         try:
-            self.model = VibeVoiceForConditionalGenerationInference.from_pretrained(
+            # Load processor
+            self.processor = VibeVoiceProcessor.from_pretrained(
                 self.model_path,
-                torch_dtype=torch.bfloat16,
-                device_map='cuda',
-                attn_implementation='flash_attention_2' # flash_attention_2 is recommended
             )
+            
+            # Load model
+            try:
+                self.model = VibeVoiceForConditionalGenerationInference.from_pretrained(
+                    self.model_path,
+                    torch_dtype=torch.bfloat16,
+                    device_map='cuda',
+                    attn_implementation='flash_attention_2' # flash_attention_2 is recommended
+                )
+            except Exception as e:
+                print(f"[ERROR] : {type(e).__name__}: {e}")
+                print(traceback.format_exc())
+                print("Error loading the model. Trying to use SDPA. However, note that only flash_attention_2 has been fully tested, and using SDPA may result in lower audio quality.")
+                self.model = VibeVoiceForConditionalGenerationInference.from_pretrained(
+                    self.model_path,
+                    torch_dtype=torch.bfloat16,
+                    device_map='cuda',
+                    attn_implementation='sdpa'
+                )
+            self.model.eval()
+            
+            # Use SDE solver by default
+            self.model.model.noise_scheduler = self.model.model.noise_scheduler.from_config(
+                self.model.model.noise_scheduler.config, 
+                algorithm_type='sde-dpmsolver++',
+                beta_schedule='squaredcos_cap_v2'
+            )
+            self.model.set_ddpm_inference_steps(num_steps=self.inference_steps)
+            
+            if hasattr(self.model.model, 'language_model'):
+                print(f"Language model attention: {self.model.model.language_model.config._attn_implementation}")
+                
+            print("✅ Model loaded successfully!")
+            
         except Exception as e:
-            print(f"[ERROR] : {type(e).__name__}: {e}")
-            print(traceback.format_exc())
-            print("Error loading the model. Trying to use SDPA. However, note that only flash_attention_2 has been fully tested, and using SDPA may result in lower audio quality.")
-            self.model = VibeVoiceForConditionalGenerationInference.from_pretrained(
-                self.model_path,
-                torch_dtype=torch.bfloat16,
-                device_map='cuda',
-                attn_implementation='sdpa'
-            )
-        self.model.eval()
+            print(f"❌ Failed to load model: {e}")
+            print("🔄 The demo will start without a loaded model.")
+            print("💡 Use the Model Download section in the UI to download a model first.")
+            self.model = None
+            self.processor = None
+    
+    def _is_valid_model_path(self, path: str) -> bool:
+        """Check if the path contains valid model files."""
+        if not os.path.exists(path) or not os.path.isdir(path):
+            return False
         
-        # Use SDE solver by default
-        self.model.model.noise_scheduler = self.model.model.noise_scheduler.from_config(
-            self.model.model.noise_scheduler.config, 
-            algorithm_type='sde-dpmsolver++',
-            beta_schedule='squaredcos_cap_v2'
-        )
-        self.model.set_ddpm_inference_steps(num_steps=self.inference_steps)
+        # Check for essential model files
+        required_files = ['config.json']
+        model_files = ['pytorch_model.bin', 'model.safetensors']
         
-        if hasattr(self.model.model, 'language_model'):
-            print(f"Language model attention: {self.model.model.language_model.config._attn_implementation}")
+        files_in_dir = os.listdir(path)
+        
+        # Check for config file
+        has_config = any(f in files_in_dir for f in required_files)
+        
+        # Check for at least one model file
+        has_model = any(f in files_in_dir for f in model_files) or \
+                   any(f.endswith('.bin') or f.endswith('.safetensors') for f in files_in_dir)
+        
+        return has_config and has_model
+    
+    def reload_model(self, new_model_path: str = None):
+        """Reload the model from a new path."""
+        if new_model_path:
+            self.model_path = new_model_path
+        
+        print(f"🔄 Reloading model from {self.model_path}")
+        self.load_model()
+        
+        if self.model is not None:
+            return f"✅ Model successfully loaded from {self.model_path}"
+        else:
+            return f"❌ Failed to load model from {self.model_path}"
+    
+    def get_model_status(self) -> str:
+        """Get current model loading status."""
+        if self.model is None or self.processor is None:
+            return f"❌ No model loaded"
+        else:
+            return f"✅ Model loaded successfully (Path: {self.model_path})"
+    
+    def scan_for_models(self) -> List[str]:
+        """Scan for available downloaded models."""
+        model_paths = []
+        
+        # Check default model directories
+        default_dirs = ["./models", "models"]
+        for base_dir in default_dirs:
+            if os.path.exists(base_dir):
+                for item in os.listdir(base_dir):
+                    item_path = os.path.join(base_dir, item)
+                    if os.path.isdir(item_path) and self._is_valid_model_path(item_path):
+                        model_paths.append(item_path)
+        
+        # Check if the current model_path is valid and not already in list
+        if self.model_path and self._is_valid_model_path(self.model_path):
+            abs_path = os.path.abspath(self.model_path)
+            if abs_path not in [os.path.abspath(p) for p in model_paths]:
+                model_paths.append(self.model_path)
+        
+        # Also check common HuggingFace cache locations
+        try:
+            cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+            if os.path.exists(cache_dir):
+                for item in os.listdir(cache_dir):
+                    if "vibevoice" in item.lower():
+                        item_path = os.path.join(cache_dir, item)
+                        if os.path.isdir(item_path):
+                            # Look for snapshots subdirectory
+                            snapshots_dir = os.path.join(item_path, "snapshots")
+                            if os.path.exists(snapshots_dir):
+                                for snapshot in os.listdir(snapshots_dir):
+                                    snapshot_path = os.path.join(snapshots_dir, snapshot)
+                                    if os.path.isdir(snapshot_path) and self._is_valid_model_path(snapshot_path):
+                                        display_name = f"🗂️ Cache: {item}"
+                                        model_paths.append(f"{snapshot_path}|{display_name}")
+        except Exception:
+            pass  # Ignore cache scanning errors
+        
+        return sorted(model_paths) if model_paths else ["No models found"]
+    
+    def get_available_models_for_dropdown(self) -> List[str]:
+        """Get formatted model list for dropdown."""
+        models = self.scan_for_models()
+        if models == ["No models found"]:
+            return ["No models found - Download one first"]
+        
+        formatted_models = []
+        for model_path in models:
+            if "|" in model_path:
+                # This is a cache entry with display name
+                actual_path, display_name = model_path.split("|", 1)
+                formatted_models.append(f"{display_name}")
+            else:
+                # Regular path
+                model_name = os.path.basename(model_path)
+                if not model_name:
+                    model_name = os.path.basename(os.path.dirname(model_path))
+                formatted_models.append(f"📁 {model_name}")
+        
+        return formatted_models
+    
+    def get_model_path_from_selection(self, selection: str) -> str:
+        """Get actual model path from dropdown selection."""
+        if "No models found" in selection:
+            return ""
+        
+        models = self.scan_for_models()
+        formatted_models = self.get_available_models_for_dropdown()
+        
+        try:
+            index = formatted_models.index(selection)
+            model_path = models[index]
+            
+            if "|" in model_path:
+                # Cache entry
+                actual_path, _ = model_path.split("|", 1)
+                return actual_path
+            else:
+                return model_path
+        except (ValueError, IndexError):
+            return ""
+    
+    def add_custom_voice(self, audio_file, voice_name: str) -> str:
+        """Add a custom voice from uploaded audio file."""
+        if not audio_file:
+            return "❌ Please upload an audio file"
+        
+        if not voice_name or not voice_name.strip():
+            return "❌ Please provide a voice name"
+        
+        # Clean the voice name
+        voice_name = voice_name.strip().replace(' ', '-')
+        
+        # Validate voice name
+        if not voice_name.replace('-', '').replace('_', '').isalnum():
+            return "❌ Voice name should only contain letters, numbers, hyphens, and underscores"
+        
+        try:
+            # Get the voices directory
+            voices_dir = os.path.join(os.path.dirname(__file__), "voices")
+            os.makedirs(voices_dir, exist_ok=True)
+            
+            # Get file extension from uploaded file
+            original_filename = audio_file.name if hasattr(audio_file, 'name') else str(audio_file)
+            file_extension = os.path.splitext(original_filename)[1].lower()
+            
+            # If no extension or unsupported extension, default to .wav
+            supported_extensions = ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac']
+            if file_extension not in supported_extensions:
+                file_extension = '.wav'
+            
+            # Create output filename
+            output_filename = f"custom-{voice_name}{file_extension}"
+            output_path = os.path.join(voices_dir, output_filename)
+            
+            # Check if voice name already exists
+            if voice_name in self.available_voices or f"custom-{voice_name}" in self.available_voices:
+                return f"❌ Voice name '{voice_name}' already exists. Please choose a different name."
+            
+            # Read and process the audio
+            audio_data = self.read_audio(audio_file, target_sr=24000)
+            
+            if len(audio_data) == 0:
+                return "❌ Failed to read audio file. Please check the file format."
+            
+            # Validate audio length (recommend 3-30 seconds)
+            duration = len(audio_data) / 24000
+            if duration < 1:
+                return f"❌ Audio too short ({duration:.1f}s). Please use audio that's at least 1 second long."
+            elif duration > 60:
+                return f"⚠️ Audio is quite long ({duration:.1f}s). Consider using a shorter sample (3-30s recommended) for better results."
+            
+            # Save the processed audio as WAV
+            output_path_wav = os.path.join(voices_dir, f"custom-{voice_name}.wav")
+            sf.write(output_path_wav, audio_data, 24000)
+            
+            # Update available voices
+            self.available_voices[f"custom-{voice_name}"] = output_path_wav
+            
+            return f"✅ Successfully added custom voice '{voice_name}' ({duration:.1f}s)\n💡 You can now select it in the Speaker dropdowns!"
+            
+        except Exception as e:
+            return f"❌ Error processing audio file: {str(e)}"
+    
+    def refresh_voice_list(self) -> List[str]:
+        """Refresh the list of available voices including custom ones."""
+        self.setup_voice_presets()  # Re-scan the voices directory
+        return list(self.available_voices.keys())
     
     def setup_voice_presets(self):
         """Setup voice presets by scanning the voices directory."""
@@ -147,6 +391,11 @@ class VibeVoiceDemo:
                                  speaker_4: str = None,
                                  cfg_scale: float = 1.3) -> Iterator[tuple]:
         try:
+            
+            # Check if model is loaded
+            if self.model is None or self.processor is None:
+                self.is_generating = False
+                raise gr.Error("❌ No model loaded! Please download a model first using the Model Download section.")
             
             # Reset stop flag and set generating state
             self.stop_generation = False
@@ -555,16 +804,146 @@ class VibeVoiceDemo:
             # Assume 1-based indexing, return the count
             return len(speakers)
     
+    def download_model(self, model_name: str, download_path: str = None) -> Iterator[str]:
+        """
+        Download a VibeVoice model from HuggingFace Hub.
+        
+        Args:
+            model_name: Name of the model to download (e.g., "VibeVoice-1.5B")
+            download_path: Path where to download the model (optional)
+            
+        Yields:
+            Status messages during download
+        """
+        if self.is_downloading:
+            yield "❌ Another download is already in progress. Please wait."
+            return
+            
+        if model_name not in self.available_models:
+            yield f"❌ Unknown model: {model_name}"
+            return
+            
+        try:
+            self.is_downloading = True
+            
+            model_info = self.available_models[model_name]
+            repo_id = model_info["repo_id"]
+            
+            if download_path is None:
+                download_path = f"./models/{model_name}"
+            
+            # Create download directory if it doesn't exist
+            os.makedirs(download_path, exist_ok=True)
+            
+            yield f"🔄 Starting download of {model_name} from {repo_id}..."
+            yield f"📂 Download location: {download_path}"
+            yield f"📊 Model size: {model_info['size']}"
+            yield f"ℹ️ {model_info['description']}"
+            
+            # Check if model already exists
+            if os.path.exists(download_path) and os.listdir(download_path):
+                yield f"⚠️ Model directory already exists at {download_path}"
+                yield f"🔄 Checking for updates and downloading missing files..."
+            
+            # Download the model
+            try:
+                downloaded_path = snapshot_download(
+                    repo_id=repo_id,
+                    local_dir=download_path,
+                    local_dir_use_symlinks=False,  # Use actual files instead of symlinks
+                    resume_download=True,  # Resume if interrupted
+                    cache_dir=None,  # Don't use cache, download directly
+                )
+                
+                yield f"✅ Successfully downloaded {model_name}!"
+                yield f"📁 Model saved to: {downloaded_path}"
+                yield f"💡 You can now use this model by setting --model_path {downloaded_path}"
+                
+            except Exception as download_error:
+                yield f"❌ Download failed: {str(download_error)}"
+                yield f"💡 This might be due to network issues or insufficient disk space."
+                
+        except Exception as e:
+            yield f"❌ An error occurred during download: {str(e)}"
+            
+        finally:
+            self.is_downloading = False
+    
+    def get_model_download_status(self, model_name: str, download_path: str = None) -> str:
+        """Check if a model is already downloaded."""
+        if download_path is None:
+            download_path = f"./models/{model_name}"
+            
+        if os.path.exists(download_path) and os.listdir(download_path):
+            # Check for key model files
+            key_files = ["config.json", "pytorch_model.bin", "model.safetensors"]
+            has_model_files = any(
+                any(f.endswith(key_file) for f in os.listdir(download_path)) 
+                for key_file in key_files
+            )
+            
+            if has_model_files:
+                return f"✅ Already downloaded at {download_path}"
+            else:
+                return f"⚠️ Directory exists but may be incomplete at {download_path}"
+        else:
+            return f"❌ Not downloaded"
+    
 
 def create_demo_interface(demo_instance: VibeVoiceDemo):
     """Create the Gradio interface with streaming support."""
     
-    # Custom CSS for high-end aesthetics with lighter theme
+    # Custom CSS for both light and dark mode support
     custom_css = """
-    /* Modern light theme with gradients */
+    /* Base theme with CSS variables for light/dark mode */
     .gradio-container {
-        background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
         font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    
+    /* Light mode (default) */
+    .gradio-container {
+        --bg-primary: #f8fafc;
+        --bg-secondary: #e2e8f0;
+        --bg-card: rgba(255, 255, 255, 0.8);
+        --bg-card-border: rgba(226, 232, 240, 0.8);
+        --text-primary: #1e293b;
+        --text-secondary: #374151;
+        --text-muted: #64748b;
+        --speaker-bg: linear-gradient(135deg, #e2e8f0 0%, #cbd5e1 100%);
+        --speaker-border: rgba(148, 163, 184, 0.4);
+        --audio-bg: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%);
+        --complete-audio-bg: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+        --complete-audio-border: rgba(34, 197, 94, 0.3);
+        --slider-bg: rgba(248, 250, 252, 0.8);
+        --slider-border: rgba(226, 232, 240, 0.6);
+        --queue-bg: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+        --queue-border: rgba(14, 165, 233, 0.3);
+        --queue-text: #0369a1;
+        
+        background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+    }
+    
+    /* Dark mode */
+    .dark .gradio-container {
+        --bg-primary: #0f172a;
+        --bg-secondary: #1e293b;
+        --bg-card: rgba(30, 41, 59, 0.8);
+        --bg-card-border: rgba(71, 85, 105, 0.8);
+        --text-primary: #f1f5f9;
+        --text-secondary: #e2e8f0;
+        --text-muted: #94a3b8;
+        --speaker-bg: linear-gradient(135deg, #334155 0%, #475569 100%);
+        --speaker-border: rgba(100, 116, 139, 0.4);
+        --audio-bg: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+        --complete-audio-bg: linear-gradient(135deg, #14532d 0%, #166534 100%);
+        --complete-audio-border: rgba(34, 197, 94, 0.5);
+        --slider-bg: rgba(30, 41, 59, 0.8);
+        --slider-border: rgba(71, 85, 105, 0.6);
+        --queue-bg: linear-gradient(135deg, #0c4a6e 0%, #075985 100%);
+        --queue-border: rgba(14, 165, 233, 0.5);
+        --queue-text: #38bdf8;
+        
+        background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
     }
     
     /* Header styling */
@@ -593,9 +972,9 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
     
     /* Card styling */
     .settings-card, .generation-card {
-        background: rgba(255, 255, 255, 0.8);
+        background: var(--bg-card);
         backdrop-filter: blur(10px);
-        border: 1px solid rgba(226, 232, 240, 0.8);
+        border: 1px solid var(--bg-card-border);
         border-radius: 16px;
         padding: 1.5rem;
         margin-bottom: 1rem;
@@ -610,11 +989,11 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
     }
     
     .speaker-item {
-        background: linear-gradient(135deg, #e2e8f0 0%, #cbd5e1 100%);
-        border: 1px solid rgba(148, 163, 184, 0.4);
+        background: var(--speaker-bg);
+        border: 1px solid var(--speaker-border);
         border-radius: 12px;
         padding: 1rem;
-        color: #374151;
+        color: var(--text-secondary);
         font-weight: 500;
     }
     
@@ -637,14 +1016,14 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
     
     /* Queue status styling */
     .queue-status {
-        background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
-        border: 1px solid rgba(14, 165, 233, 0.3);
+        background: var(--queue-bg);
+        border: 1px solid var(--queue-border);
         border-radius: 8px;
         padding: 0.75rem;
         margin: 0.5rem 0;
         text-align: center;
         font-size: 0.9rem;
-        color: #0369a1;
+        color: var(--queue-text);
     }
     
     .generate-btn {
@@ -683,50 +1062,63 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
     
     /* Audio player styling */
     .audio-output {
-        background: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%);
+        background: var(--audio-bg);
         border-radius: 16px;
         padding: 1.5rem;
-        border: 1px solid rgba(148, 163, 184, 0.3);
+        border: 1px solid var(--speaker-border);
     }
     
     .complete-audio-section {
         margin-top: 1rem;
         padding: 1rem;
-        background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
-        border: 1px solid rgba(34, 197, 94, 0.3);
+        background: var(--complete-audio-bg);
+        border: 1px solid var(--complete-audio-border);
         border-radius: 12px;
     }
     
-    /* Text areas */
+    /* Text areas - adaptive colors */
     .script-input, .log-output {
-        background: rgba(255, 255, 255, 0.9) !important;
-        border: 1px solid rgba(148, 163, 184, 0.4) !important;
+        background: var(--bg-card) !important;
+        border: 1px solid var(--speaker-border) !important;
         border-radius: 12px !important;
-        color: #1e293b !important;
+        color: var(--text-primary) !important;
         font-family: 'JetBrains Mono', monospace !important;
     }
     
     .script-input::placeholder {
-        color: #64748b !important;
+        color: var(--text-muted) !important;
     }
     
     /* Sliders */
     .slider-container {
-        background: rgba(248, 250, 252, 0.8);
-        border: 1px solid rgba(226, 232, 240, 0.6);
+        background: var(--slider-bg);
+        border: 1px solid var(--slider-border);
         border-radius: 8px;
         padding: 1rem;
         margin: 0.5rem 0;
     }
     
-    /* Labels and text */
+    /* Labels and text - adaptive colors */
     .gradio-container label {
-        color: #374151 !important;
+        color: var(--text-secondary) !important;
         font-weight: 600 !important;
     }
     
     .gradio-container .markdown {
-        color: #1f2937 !important;
+        color: var(--text-primary) !important;
+    }
+    
+    /* Dark mode specific text overrides */
+    .dark .gradio-container .markdown h1,
+    .dark .gradio-container .markdown h2,
+    .dark .gradio-container .markdown h3,
+    .dark .gradio-container .markdown h4 {
+        color: var(--text-primary) !important;
+    }
+    
+    .dark .gradio-container .markdown p,
+    .dark .gradio-container .markdown li {
+        color: var(--text-secondary) !important;
     }
     
     /* Responsive design */
@@ -755,6 +1147,17 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
         transform: translateY(-2px);
         box-shadow: 0 6px 25px rgba(100, 116, 139, 0.4);
         background: linear-gradient(135deg, #475569 0%, #334155 100%);
+    }
+    
+    /* Dark mode button adjustments */
+    .dark .random-btn {
+        background: linear-gradient(135deg, #475569 0%, #334155 100%);
+        box-shadow: 0 4px 20px rgba(71, 85, 105, 0.3);
+    }
+    
+    .dark .random-btn:hover {
+        background: linear-gradient(135deg, #334155 0%, #1e293b 100%);
+        box-shadow: 0 6px 25px rgba(71, 85, 105, 0.4);
     }
     """
     
@@ -794,6 +1197,42 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                 # Speaker selection
                 gr.Markdown("### 🎭 **Speaker Selection**")
                 
+                # Custom voice upload section
+                with gr.Accordion("🎤 Upload Custom Voices", open=False):
+                    gr.Markdown("""
+                    Upload your own voice samples to create custom speakers:
+                    - **Format**: WAV, MP3, FLAC, OGG, M4A, AAC
+                    - **Length**: 3-30 seconds recommended
+                    - **Quality**: Clear speech, minimal background noise
+                    - **Content**: Natural speaking voice works best
+                    """)
+                    
+                    custom_voice_upload = gr.File(
+                        label="Upload Voice Sample",
+                        file_types=["audio"],
+                        elem_classes="script-input"
+                    )
+                    
+                    custom_voice_name = gr.Textbox(
+                        label="Voice Name",
+                        placeholder="e.g., 'My-Voice' or 'John-Narrator'",
+                        elem_classes="script-input"
+                    )
+                    
+                    add_custom_voice_btn = gr.Button(
+                        "➕ Add Custom Voice",
+                        size="sm",
+                        variant="secondary",
+                        elem_classes="random-btn"
+                    )
+                    
+                    custom_voice_status = gr.Textbox(
+                        label="Upload Status",
+                        lines=3,
+                        interactive=False,
+                        elem_classes="log-output"
+                    )
+                
                 available_speaker_names = list(demo_instance.available_voices.keys())
                 # default_speakers = available_speaker_names[:4] if len(available_speaker_names) >= 4 else available_speaker_names
                 default_speakers = ['en-Alice_woman', 'en-Carter_man', 'en-Frank_man', 'en-Maya_woman']
@@ -809,6 +1248,99 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                         elem_classes="speaker-item"
                     )
                     speaker_selections.append(speaker)
+                
+                # Model Status Section
+                gr.Markdown("### 📊 **Model Management**")
+                
+                model_status_display = gr.Textbox(
+                    label="Current Model Status",
+                    value=demo_instance.get_model_status(),
+                    interactive=False,
+                    elem_classes="log-output"
+                )
+                
+                # Model selection dropdown
+                available_models = demo_instance.get_available_models_for_dropdown()
+                model_selection_dropdown = gr.Dropdown(
+                    choices=available_models,
+                    value=available_models[0] if available_models else None,
+                    label="Select Model to Load",
+                    elem_classes="speaker-item"
+                )
+                
+                # Refresh models button
+                refresh_models_btn = gr.Button(
+                    "🔄 Refresh Model List",
+                    size="sm",
+                    variant="secondary",
+                    elem_classes="random-btn"
+                )
+                
+                # Load selected model button
+                load_selected_model_btn = gr.Button(
+                    "📂 Load Selected Model",
+                    size="lg",
+                    variant="primary",
+                    elem_classes="generate-btn"
+                )
+                
+                # Advanced model path input (for custom paths)
+                with gr.Accordion("Advanced: Custom Model Path", open=False):
+                    model_path_input = gr.Textbox(
+                        label="Custom Model Path",
+                        placeholder="Enter path to VibeVoice model",
+                        elem_classes="script-input"
+                    )
+                    
+                    load_custom_model_btn = gr.Button(
+                        "🔄 Load Custom Model",
+                        size="sm",
+                        variant="secondary",
+                        elem_classes="random-btn"
+                    )
+                
+                # Model Download Section
+                gr.Markdown("### 📥 **Model Download**")
+                
+                with gr.Accordion("Download VibeVoice Models", open=False):
+                    gr.Markdown("""
+                    Download pre-trained VibeVoice models from HuggingFace Hub:
+                    
+                    - **VibeVoice-1.5B**: Compact model (~2.7B parameters), good for most use cases
+                    - **VibeVoice-7B-Preview**: Larger model (~9.34B parameters), potentially higher quality
+                    """)
+                    
+                    # Model selection for download
+                    model_selection = gr.Radio(
+                        choices=["VibeVoice-1.5B", "VibeVoice-7B-Preview"],
+                        value="VibeVoice-1.5B",
+                        label="Select Model to Download",
+                        elem_classes="speaker-item"
+                    )
+                    
+                    # Download path input
+                    download_path_input = gr.Textbox(
+                        label="Download Path (optional)",
+                        placeholder="./models/VibeVoice-1.5B (leave empty for default)",
+                        elem_classes="script-input"
+                    )
+                    
+                    # Download button
+                    download_btn = gr.Button(
+                        "📥 Download Model",
+                        size="lg",
+                        variant="secondary",
+                        elem_classes="random-btn"
+                    )
+                    
+                    # Download status/log
+                    download_status = gr.Textbox(
+                        label="Download Status",
+                        lines=8,
+                        max_lines=15,
+                        interactive=False,
+                        elem_classes="log-output"
+                    )
                 
                 # Advanced settings
                 gr.Markdown("### ⚙️ **Advanced Settings**")
@@ -1063,15 +1595,157 @@ Or paste text directly and it will auto-assign speakers.""",
             queue=False  # Don't queue this simple operation
         )
         
+
+        
+        def update_download_placeholder(model_name):
+            """Update placeholder text based on selected model."""
+            return gr.update(placeholder=f"./models/{model_name} (leave empty for default)")
+        
+        # Connect model selection to update placeholder
+        model_selection.change(
+            fn=update_download_placeholder,
+            inputs=[model_selection],
+            outputs=[download_path_input],
+            queue=False
+        )
+        
+        # Model management functions
+        def refresh_model_list():
+            """Refresh the list of available models."""
+            available_models = demo_instance.get_available_models_for_dropdown()
+            return gr.update(choices=available_models, value=available_models[0] if available_models else None)
+        
+        def handle_load_selected_model(selected_model):
+            """Handle loading the selected model from dropdown."""
+            if not selected_model or "No models found" in selected_model:
+                return "❌ No model selected or no models available", demo_instance.get_model_status()
+            
+            model_path = demo_instance.get_model_path_from_selection(selected_model)
+            if not model_path:
+                return "❌ Could not determine model path", demo_instance.get_model_status()
+            
+            result = demo_instance.reload_model(model_path)
+            return result, demo_instance.get_model_status()
+        
+        def handle_load_custom_model(model_path):
+            """Handle model reload from custom path."""
+            if not model_path.strip():
+                return "❌ Please provide a model path", demo_instance.get_model_status()
+            
+            result = demo_instance.reload_model(model_path.strip())
+            return result, demo_instance.get_model_status()
+        
+        def handle_model_download_with_refresh(model_name, download_path):
+            """Handle model download and refresh model list after completion."""
+            # Clear download path if it's empty
+            if not download_path.strip():
+                download_path = None
+                
+            final_download_path = download_path if download_path else f"./models/{model_name}"
+                
+            # Check current status first
+            status = demo_instance.get_model_download_status(model_name, download_path)
+            yield f"📋 Current status: {status}\n", demo_instance.get_model_status(), gr.update()
+            
+            # If already downloaded, ask user if they want to re-download
+            if "✅ Already downloaded" in status:
+                yield f"{status}\n🔄 Proceeding to check for updates...", demo_instance.get_model_status(), gr.update()
+            
+            # Stream download progress
+            download_completed = False
+            for progress_msg in demo_instance.download_model(model_name, download_path):
+                yield progress_msg, demo_instance.get_model_status(), gr.update()
+                if "✅ Successfully downloaded" in progress_msg:
+                    download_completed = True
+            
+            # If download completed successfully, refresh the model list
+            if download_completed:
+                yield f"📥 Download completed! Model saved to {final_download_path}", demo_instance.get_model_status(), gr.update()
+                # Refresh model list
+                available_models = demo_instance.get_available_models_for_dropdown()
+                yield f"📥 Download completed! Model saved to {final_download_path}\n🔄 Model list refreshed.", demo_instance.get_model_status(), gr.update(choices=available_models, value=f"📁 {model_name}")
+        
+        # Connect refresh button
+        refresh_models_btn.click(
+            fn=refresh_model_list,
+            inputs=[],
+            outputs=[model_selection_dropdown],
+            queue=False
+        )
+        
+        # Connect load selected model button
+        load_selected_model_btn.click(
+            fn=handle_load_selected_model,
+            inputs=[model_selection_dropdown],
+            outputs=[download_status, model_status_display],
+            queue=False
+        )
+        
+        # Connect custom model load button
+        load_custom_model_btn.click(
+            fn=handle_load_custom_model,
+            inputs=[model_path_input],
+            outputs=[download_status, model_status_display],
+            queue=False
+        )
+        
+        # Connect download button (now with model list refresh)
+        download_btn.click(
+            fn=handle_model_download_with_refresh,
+            inputs=[model_selection, download_path_input],
+            outputs=[download_status, model_status_display, model_selection_dropdown],
+            queue=True  # Queue download requests
+        )
+        
+        # Custom voice upload functions
+        def handle_custom_voice_upload(audio_file, voice_name):
+            """Handle custom voice upload and refresh speaker dropdowns."""
+            result = demo_instance.add_custom_voice(audio_file, voice_name)
+            
+            # Refresh the voice list
+            updated_voices = demo_instance.refresh_voice_list()
+            
+            # Create updates for all speaker dropdowns
+            dropdown_updates = []
+            for i in range(4):
+                dropdown_updates.append(gr.update(choices=updated_voices))
+            
+            return result, *dropdown_updates
+        
+        # Connect custom voice upload button
+        add_custom_voice_btn.click(
+            fn=handle_custom_voice_upload,
+            inputs=[custom_voice_upload, custom_voice_name],
+            outputs=[custom_voice_status] + speaker_selections,
+            queue=False
+        )
+        
         # Add usage tips
         gr.Markdown("""
         ### 💡 **Usage Tips**
         
-        - Click **🚀 Generate Podcast** to start audio generation
-        - **Live Streaming** tab shows audio as it's generated (may have slight pauses)
-        - **Complete Audio** tab provides the full, uninterrupted podcast after generation
+        **Getting Started:**
+        1. **📥 Download Models**: Use the Model Download section to get VibeVoice-1.5B (compact) or VibeVoice-7B-Preview (larger, higher quality)
+        2. **📂 Select Model**: Choose which downloaded model to load from the dropdown
+        3. **🔄 Load Model**: Click "Load Selected Model" to activate your chosen model
+        4. **📊 Check Status**: Monitor loading status in the Model Management section
+        
+        **Model Management:**
+        - **🔄 Refresh Model List**: Scans for newly downloaded models
+        - **📁 Custom Path**: Load models from custom locations using the Advanced section
+        - Models are automatically detected in `./models/` and HuggingFace cache
+        
+        **Custom Voices:**
+        - **🎤 Upload Voice Samples**: Add your own voice samples (WAV, MP3, FLAC, etc.)
+        - **📏 Recommended Length**: 3-30 seconds of clear speech
+        - **✨ Best Quality**: Use high-quality recordings with minimal background noise
+        - **🔄 Auto-Update**: Custom voices automatically appear in speaker dropdowns
+        
+        **Generating Podcasts:**
+        - Click **🚀 Generate Podcast** to start audio generation (model must be loaded first)
+        - **Live Streaming** shows audio as it's generated (may have slight pauses)
+        - **Complete Audio** provides the full, uninterrupted podcast after generation
         - During generation, you can click **🛑 Stop Generation** to interrupt the process
-        - The streaming indicator shows real-time generation progress
         """)
         
         # Add example scripts
@@ -1127,7 +1801,7 @@ def parse_args():
     parser.add_argument(
         "--model_path",
         type=str,
-        default="/tmp/vibevoice-model",
+        default="./models",
         help="Path to the VibeVoice model directory",
     )
     parser.add_argument(
@@ -1176,10 +1850,11 @@ def main():
     interface = create_demo_interface(demo_instance)
     
     print(f"🚀 Launching demo on port {args.port}")
-    print(f"📁 Model path: {args.model_path}")
+    print(f"📁 Default model directory: {args.model_path}")
     print(f"🎭 Available voices: {len(demo_instance.available_voices)}")
     print(f"🔴 Streaming mode: ENABLED")
     print(f"🔒 Session isolation: ENABLED")
+    print(f"💡 Models can be downloaded and managed through the web interface")
     
     # Launch the interface
     try:
