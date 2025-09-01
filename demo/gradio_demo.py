@@ -22,19 +22,21 @@ import traceback
 from huggingface_hub import snapshot_download, hf_hub_download
 import shutil
 
+from transformers.utils import logging
+from transformers import set_seed
+
+# Suppress the APEX FusedRMSNorm warning message BEFORE importing VibeVoice modules
+logging.set_verbosity_info()
+tokenizer_logger = logging.get_logger("vibevoice.modular.modular_vibevoice_tokenizer")
+tokenizer_logger.setLevel(logging.ERROR)  # Only show ERROR level and above
+
+logger = logging.get_logger(__name__)
+
+# Import VibeVoice modules AFTER logging configuration
 from vibevoice.modular.configuration_vibevoice import VibeVoiceConfig
 from vibevoice.modular.modeling_vibevoice_inference import VibeVoiceForConditionalGenerationInference
 from vibevoice.processor.vibevoice_processor import VibeVoiceProcessor
 from vibevoice.modular.streamer import AudioStreamer
-from transformers.utils import logging
-from transformers import set_seed
-
-logging.set_verbosity_info()
-logger = logging.get_logger(__name__)
-
-# Suppress the APEX FusedRMSNorm warning message
-tokenizer_logger = logging.get_logger("vibevoice.modular.modular_vibevoice_tokenizer")
-tokenizer_logger.setLevel(logging.ERROR)  # Only show ERROR level and above
 
 
 class VibeVoiceDemo:
