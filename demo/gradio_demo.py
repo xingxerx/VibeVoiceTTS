@@ -55,10 +55,10 @@ class VibeVoiceDemo:
                 "size": "~2.7B parameters",
                 "description": "Compact model, good for most use cases"
             },
-            "VibeVoice-7B-Preview": {
-                "repo_id": "WestZhang/VibeVoice-Large-pt", 
+            "VibeVoice-Large": {
+                "repo_id": "microsoft/VibeVoice-Large",
                 "size": "~9.34B parameters",
-                "description": "Larger model, potentially higher quality"
+                "description": "Large model, higher quality, ~45 min generation"
             }
         }
         
@@ -1306,13 +1306,13 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                     gr.Markdown("""
                     Download pre-trained VibeVoice models from HuggingFace Hub:
                     
-                    - **VibeVoice-1.5B**: Compact model (~2.7B parameters), good for most use cases
-                    - **VibeVoice-7B-Preview**: Larger model (~9.34B parameters), potentially higher quality
+                    - **VibeVoice-1.5B**: Compact model (~2.7B parameters), good for most use cases, ~90 min generation
+                    - **VibeVoice-Large**: Large model (~9.34B parameters), higher quality, ~45 min generation
                     """)
                     
                     # Model selection for download
                     model_selection = gr.Radio(
-                        choices=["VibeVoice-1.5B", "VibeVoice-7B-Preview"],
+                        choices=["VibeVoice-1.5B", "VibeVoice-Large"],
                         value="VibeVoice-1.5B",
                         label="Select Model to Download",
                         elem_classes="speaker-item"
