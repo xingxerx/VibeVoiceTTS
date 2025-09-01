@@ -174,12 +174,57 @@ class VibeVoiceDemo:
         
         return has_config and has_model
     
+    def unload_model(self):
+        """Unload the current model from memory."""
+        if self.model is None and self.processor is None:
+            return "ℹ️ No model is currently loaded."
+        
+        print("🗑️ Unloading current model from memory...")
+        
+        try:
+            # Clear the model and processor references
+            if hasattr(self, 'model') and self.model is not None:
+                # Move model to CPU first to free GPU memory
+                if hasattr(self.model, 'cpu'):
+                    self.model.cpu()
+                del self.model
+                self.model = None
+            
+            if hasattr(self, 'processor') and self.processor is not None:
+                del self.processor
+                self.processor = None
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            
+            # Clear CUDA cache if using CUDA
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                print("🧹 Cleared CUDA cache")
+            
+            print("✅ Model unloaded successfully")
+            return "✅ Model unloaded successfully. GPU/CPU memory has been freed."
+            
+        except Exception as e:
+            error_msg = f"❌ Error during model unloading: {str(e)}"
+            print(error_msg)
+            # Ensure variables are reset even if there was an error
+            self.model = None
+            self.processor = None
+            return error_msg
+    
     def reload_model(self, new_model_path: str = None):
         """Reload the model from a new path."""
+        # First unload the current model if one is loaded
+        if self.model is not None or self.processor is not None:
+            print("🔄 Unloading current model before loading new one...")
+            self.unload_model()
+        
         if new_model_path:
             self.model_path = new_model_path
         
-        print(f"🔄 Reloading model from {self.model_path}")
+        print(f"🔄 Loading model from {self.model_path}")
         self.load_model()
         
         if self.model is not None:
@@ -1291,13 +1336,23 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                     elem_classes="random-btn"
                 )
                 
-                # Load selected model button
-                load_selected_model_btn = gr.Button(
-                    "📂 Load Selected Model",
-                    size="lg",
-                    variant="primary",
-                    elem_classes="generate-btn"
-                )
+                # Model action buttons row
+                with gr.Row():
+                    load_selected_model_btn = gr.Button(
+                        "📂 Load Selected Model",
+                        size="lg",
+                        variant="primary",
+                        elem_classes="generate-btn",
+                        scale=2
+                    )
+                    
+                    unload_model_btn = gr.Button(
+                        "🗑️ Unload Model",
+                        size="lg",
+                        variant="secondary",
+                        elem_classes="stop-btn",
+                        scale=1
+                    )
                 
                 # Advanced model path input (for custom paths)
                 with gr.Accordion("Advanced: Custom Model Path", open=False):
@@ -1650,6 +1705,11 @@ Or paste text directly and it will auto-assign speakers.""",
             result = demo_instance.reload_model(model_path.strip())
             return result, demo_instance.get_model_status()
         
+        def handle_unload_model():
+            """Handle unloading the current model."""
+            result = demo_instance.unload_model()
+            return result, demo_instance.get_model_status()
+        
         def handle_model_download_with_refresh(model_name, download_path):
             """Handle model download and refresh model list after completion."""
             # Clear download path if it's empty
@@ -1692,6 +1752,14 @@ Or paste text directly and it will auto-assign speakers.""",
         load_selected_model_btn.click(
             fn=handle_load_selected_model,
             inputs=[model_selection_dropdown],
+            outputs=[download_status, model_status_display],
+            queue=False
+        )
+        
+        # Connect unload model button
+        unload_model_btn.click(
+            fn=handle_unload_model,
+            inputs=[],
             outputs=[download_status, model_status_display],
             queue=False
         )
@@ -1747,8 +1815,11 @@ Or paste text directly and it will auto-assign speakers.""",
         
         **Model Management:**
         - **🔄 Refresh Model List**: Scans for newly downloaded models
+        - **📂 Load Selected Model**: Load a model from the dropdown list
+        - **🗑️ Unload Model**: Remove the current model from memory to free up GPU/CPU resources
         - **📁 Custom Path**: Load models from custom locations using the Advanced section
         - Models are automatically detected in `./models/` and HuggingFace cache
+        - **💡 Memory Management**: Unload models before loading new ones to prevent memory issues
         
         **Custom Voices:**
         - **🎤 Upload Voice Samples**: Add your own voice samples (WAV, MP3, FLAC, etc.)
