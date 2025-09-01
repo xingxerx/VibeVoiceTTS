@@ -1267,9 +1267,11 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                     - **Content**: Natural speaking voice works best
                     """)
                     
-                    custom_voice_upload = gr.File(
+                    custom_voice_upload = gr.Audio(
                         label="Upload Voice Sample",
-                        file_types=["audio"],
+                        sources=["upload", "microphone"],
+                        type="filepath",
+                        interactive=True,
                         elem_classes="script-input"
                     )
                     
@@ -1803,36 +1805,35 @@ Or paste text directly and it will auto-assign speakers.""",
             queue=False
         )
         
-        # Add usage tips
-        gr.Markdown("""
-        ### 💡 **Usage Tips**
-        
-        **Getting Started:**
-        1. **📥 Download Models**: Use the Model Download section to get VibeVoice-1.5B (compact) or VibeVoice-7B-Preview (larger, higher quality)
-        2. **📂 Select Model**: Choose which downloaded model to load from the dropdown
-        3. **🔄 Load Model**: Click "Load Selected Model" to activate your chosen model
-        4. **📊 Check Status**: Monitor loading status in the Model Management section
-        
-        **Model Management:**
-        - **🔄 Refresh Model List**: Scans for newly downloaded models
-        - **📂 Load Selected Model**: Load a model from the dropdown list
-        - **🗑️ Unload Model**: Remove the current model from memory to free up GPU/CPU resources
-        - **📁 Custom Path**: Load models from custom locations using the Advanced section
-        - Models are automatically detected in `./models/` and HuggingFace cache
-        - **💡 Memory Management**: Unload models before loading new ones to prevent memory issues
-        
-        **Custom Voices:**
-        - **🎤 Upload Voice Samples**: Add your own voice samples (WAV, MP3, FLAC, etc.)
-        - **📏 Recommended Length**: 3-30 seconds of clear speech
-        - **✨ Best Quality**: Use high-quality recordings with minimal background noise
-        - **🔄 Auto-Update**: Custom voices automatically appear in speaker dropdowns
-        
-        **Generating Podcasts:**
-        - Click **🚀 Generate Podcast** to start audio generation (model must be loaded first)
-        - **Live Streaming** shows audio as it's generated (may have slight pauses)
-        - **Complete Audio** provides the full, uninterrupted podcast after generation
-        - During generation, you can click **🛑 Stop Generation** to interrupt the process
-        """)
+        # Add usage tips in a closed accordion
+        with gr.Accordion("💡 Usage Tips", open=False):
+            gr.Markdown("""
+            **Getting Started:**
+            1. **📥 Download Models**: Use the Model Download section to get VibeVoice-1.5B (compact) or VibeVoice-7B-Preview (larger, higher quality)
+            2. **📂 Select Model**: Choose which downloaded model to load from the dropdown
+            3. **🔄 Load Model**: Click "Load Selected Model" to activate your chosen model
+            4. **📊 Check Status**: Monitor loading status in the Model Management section
+            
+            **Model Management:**
+            - **🔄 Refresh Model List**: Scans for newly downloaded models
+            - **📂 Load Selected Model**: Load a model from the dropdown list
+            - **🗑️ Unload Model**: Remove the current model from memory to free up GPU/CPU resources
+            - **📁 Custom Path**: Load models from custom locations using the Advanced section
+            - Models are automatically detected in `./models/` and HuggingFace cache
+            - **💡 Memory Management**: Unload models before loading new ones to prevent memory issues
+            
+            **Custom Voices:**
+            - **🎤 Upload Voice Samples**: Add your own voice samples (WAV, MP3, FLAC, etc.)
+            - **📏 Recommended Length**: 3-30 seconds of clear speech
+            - **✨ Best Quality**: Use high-quality recordings with minimal background noise
+            - **🔄 Auto-Update**: Custom voices automatically appear in speaker dropdowns
+            
+            **Generating Podcasts:**
+            - Click **🚀 Generate Podcast** to start audio generation (model must be loaded first)
+            - **Live Streaming** shows audio as it's generated (may have slight pauses)
+            - **Complete Audio** provides the full, uninterrupted podcast after generation
+            - During generation, you can click **🛑 Stop Generation** to interrupt the process
+            """)
         
         # Add example scripts
         gr.Markdown("### 📚 **Example Scripts**")
