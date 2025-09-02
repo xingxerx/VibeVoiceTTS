@@ -1,7 +1,7 @@
 
 ---
 
-# VibeVoiceTTS 🎙️
+# VibeVoiceTTS-Windows NVIDIA Version🎙️
 <img width="1489" height="1217" alt="Screenshot 2025-09-02 213147" src="https://github.com/user-attachments/assets/c9aed0db-8266-444d-8f20-371a870e8d50" />
 
 **Long-form Multi-Speaker Text-to-Speech with Streaming Support**
@@ -102,6 +102,13 @@ They will automatically show up in the Gradio demo.
 * Generation may take a long time (up to \~90 minutes depending on model).
 
 Users are responsible for ensuring safe and ethical use of generated audio.
+
+---
+
+## 🙏 Acknowledgements
+
+This project builds upon and extends the amazing work from [microsoft/VibeVoice](https://github.com/microsoft/VibeVoice).  
+Huge thanks to the original authors for open-sourcing their research and tools, which made this project possible.
 
 ---
 
