@@ -2,6 +2,7 @@
 ---
 
 # VibeVoiceTTS 🎙️
+<img width="1489" height="1217" alt="Screenshot 2025-09-02 213147" src="https://github.com/user-attachments/assets/c9aed0db-8266-444d-8f20-371a870e8d50" />
 
 **Long-form Multi-Speaker Text-to-Speech with Streaming Support**
 
