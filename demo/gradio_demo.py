@@ -49,6 +49,7 @@ class VibeVoiceDemo:
         self.stop_generation = False  # Flag to stop generation
         self.current_streamer = None  # Track current audio streamer
         self.is_downloading = False  # Track download state
+        self.use_flash_attention = True  # Default to Flash Attention
         
         # Available models for download
         self.available_models = {
@@ -101,15 +102,18 @@ class VibeVoiceDemo:
                 self.model_path,
             )
             
-            # Load model with appropriate attention implementation
-            # Flash Attention 2 is not available on Windows, so use SDPA instead
+            # Load model with user-selected attention implementation
             import platform
-            if platform.system() == "Windows":
-                print("🪟 Windows detected: Using SDPA attention implementation (Flash Attention 2 not available on Windows)")
-                attn_implementation = 'sdpa'
-            else:
-                print("🐧 Linux/Unix detected: Using Flash Attention 2 for optimal performance")
+            if self.use_flash_attention:
                 attn_implementation = 'flash_attention_2'
+                print("⚡ Using Flash Attention 2 for optimal performance")
+            else:
+                attn_implementation = 'sdpa'
+                print("🔧 Using SDPA attention implementation")
+            
+            # Override on Windows if Flash Attention is selected but not available
+            if platform.system() == "Windows" and self.use_flash_attention:
+                print("🪟 Windows detected: Flash Attention 2 not available, falling back to SDPA")
             
             try:
                 self.model = VibeVoiceForConditionalGenerationInference.from_pretrained(
@@ -949,6 +953,12 @@ class VibeVoiceDemo:
         else:
             return f"❌ Not downloaded"
     
+    def set_attention_implementation(self, use_flash_attention: bool):
+        """Set the attention implementation preference."""
+        self.use_flash_attention = use_flash_attention
+        attention_type = "Flash Attention 2" if use_flash_attention else "SDPA"
+        return f"✅ Attention implementation set to: {attention_type}"
+    
 
 def create_demo_interface(demo_instance: VibeVoiceDemo):
     """Create the Gradio interface with streaming support."""
@@ -1345,16 +1355,25 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                         size="lg",
                         variant="primary",
                         elem_classes="generate-btn",
-                        scale=2
+                        scale=1
                     )
                     
                     unload_model_btn = gr.Button(
-                        "🗑️ Unload Model",
+                        "🗑️ Unload Model Only works before a generation",
                         size="lg",
                         variant="secondary",
                         elem_classes="stop-btn",
-                        scale=1
+                        scale=2
                     )
+                
+                # Attention Implementation Settings
+                gr.Markdown("**Attention Implementation:**")
+                use_flash_attention = gr.Checkbox(
+                    label="Use Flash Attention 2 (Uncheck for SDPA)",
+                    value=True,  # Default to Flash Attention
+                    info="Enable for better performance and memory efficiency. ⚠️UNCHECK BEFORE LOADING A MODEL⚠️",
+                    elem_classes="speaker-item"
+                )
                 
                 # Advanced model path input (for custom paths)
                 with gr.Accordion("Advanced: Custom Model Path", open=False):
@@ -1805,6 +1824,20 @@ Or paste text directly and it will auto-assign speakers.""",
             queue=False
         )
         
+        # Function to handle attention implementation change
+        def handle_attention_change(use_flash_attention):
+            """Handle changing the attention implementation preference."""
+            result = demo_instance.set_attention_implementation(use_flash_attention)
+            return result
+        
+        # Connect attention implementation checkbox
+        use_flash_attention.change(
+            fn=handle_attention_change,
+            inputs=[use_flash_attention],
+            outputs=[download_status],  # Use download_status to show the result
+            queue=False
+        )
+        
         # Add usage tips in a closed accordion
         with gr.Accordion("💡 Usage Tips", open=False):
             gr.Markdown("""
@@ -1821,6 +1854,13 @@ Or paste text directly and it will auto-assign speakers.""",
             - **📁 Custom Path**: Load models from custom locations using the Advanced section
             - Models are automatically detected in `./models/` and HuggingFace cache
             - **💡 Memory Management**: Unload models before loading new ones to prevent memory issues
+            
+            **Attention Implementation:**
+            - **⚡ Flash Attention 2**: Faster and more memory-efficient (recommended when available)
+            - **🔧 SDPA**: Scaled Dot Product Attention (more compatible fallback)
+            - Setting is located below the Load/Unload Model buttons
+            - Change takes effect when you next load/reload a model
+            - Flash Attention 2 may not be available on all systems (e.g., Windows)
             
             **Custom Voices:**
             - **🎤 Upload Voice Samples**: Add your own voice samples (WAV, MP3, FLAC, etc.)
