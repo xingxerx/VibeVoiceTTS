@@ -59,7 +59,7 @@ class VibeVoiceDemo:
                 "description": "Compact model, good for most use cases"
             },
             "VibeVoice-Large": {
-                "repo_id": "microsoft/VibeVoice-Large",
+                "repo_id": "vibevoice/VibeVoice-7B",
                 "size": "~9.34B parameters",
                 "description": "Large model, higher quality, ~45 min generation"
             }
